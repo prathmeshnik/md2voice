@@ -1,0 +1,12 @@
+venv/
+__pycache__/
+*.pyc
+models/*.onnx
+models/*.onnx.json
+voice-notes/
+*.mp3
+*.wav
+.env
+.claude/
+chat-mood/
+

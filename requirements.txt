@@ -1,0 +1,13 @@
+# Online mode (default) — Cerebras API for text + edge-tts for TTS
+edge-tts>=6.1.0
+openai>=1.0.0
+
+# Local TTS mode (--local) — GPU by default, --cpu to force CPU
+# onnxruntime-gpu includes CPU fallback, no need for separate onnxruntime
+piper-tts>=1.4.0
+onnxruntime-gpu==1.20.1
+huggingface-hub>=0.20.0
+huggingface-hub>=0.20.0
+
+# Audio metadata (duration for embed)
+mutagen>=1.47.0
