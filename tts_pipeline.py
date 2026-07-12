@@ -15,6 +15,7 @@ DEFAULT_VOICE = "en-US-JennyNeural"
 DEFAULT_PIPER_VOICE = "en_US-lessac-medium"
 DEFAULT_MODEL = "gpt-oss-120b"
 CEREBRAS_BASE_URL = "https://api.cerebras.ai/v1"
+LLAMA_CPP_BASE_URL = "http://localhost:8080/v1"
 
 
 def parse_args() -> argparse.Namespace:
@@ -32,13 +33,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model",
         default=DEFAULT_MODEL,
-        help=f"Cerebras model (default: {DEFAULT_MODEL})",
+        help=f"Cerebras model (default: {DEFAULT_MODEL}) — ignored when --llm local",
     )
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument("--local", action="store_true", help="Local TTS via Piper")
-    group.add_argument(
-        "--online", action="store_true", help="Online TTS via edge-tts (default)"
-    )
+    parser.add_argument("--local", action="store_true", help="Shorthand: use local LLM + local TTS")
+    parser.add_argument("--online", action="store_true", help="Shorthand: use online LLM + online TTS (default)")
+    parser.add_argument("--llm", choices=["online", "local"], help="LLM backend (online: Cerebras, local: llama.cpp)")
+    parser.add_argument("--tts", choices=["online", "local"], help="TTS backend (online: edge-tts, local: Piper)")
     device = parser.add_mutually_exclusive_group()
     device.add_argument("--cpu", action="store_true", help="Use CPU for local TTS")
     device.add_argument("--gpu", action="store_true", help="Use GPU for local TTS (default)")
@@ -155,6 +155,29 @@ async def call_cerebras(client, system_prompt: str, file_content: str, model: st
         return response.choices[0].message.content.strip()
     except Exception as e:
         print(f"  [ERROR] Cerebras API call failed: {e}")
+        return ""
+
+
+# ── Local LLM (llama.cpp) ──────────────────────────────────
+
+
+async def call_llama_cpp(client, system_prompt: str, file_content: str, model: str) -> str:
+    try:
+        response = client.chat.completions.create(
+            model=model or "local",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": f"Rewrite this documentation file into voice-friendly text:\n\n{file_content}",
+                },
+            ],
+            temperature=0.7,
+            max_tokens=4096,
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        print(f"  [ERROR] llama.cpp call failed: {e}")
         return ""
 
 
@@ -280,6 +303,7 @@ async def process_file(
     model: str,
     piper_voice,
     next_file: Path = None,
+    llm_mode: str = "online",
 ):
     rel_path = source_path.relative_to(root)
     print(f"\n=== Processing: {rel_path}")
@@ -300,10 +324,14 @@ async def process_file(
                 pass
         file_prompt = system_prompt + extra
 
-    print(f"  Calling Cerebras API ({model})...")
-    voice_text = await call_cerebras(client, file_prompt, content, model)
+    llm_label = "llama.cpp" if llm_mode == "local" else "Cerebras API"
+    print(f"  Calling {llm_label} ({model})...")
+    if llm_mode == "local":
+        voice_text = await call_llama_cpp(client, file_prompt, content, model)
+    else:
+        voice_text = await call_cerebras(client, file_prompt, content, model)
     if not voice_text:
-        print(f"  [SKIP] No response from Cerebras")
+        print(f"  [SKIP] No response from LLM")
         return
 
     save_voice_md(voice_text, root / VOICE_NOTES_DIR / rel_path)
@@ -321,6 +349,20 @@ async def process_file(
 
 async def main():
     args = parse_args()
+
+    llm_mode = "online"
+    tts_mode = "online"
+    if args.local:
+        llm_mode = "local"
+        tts_mode = "local"
+    if args.online:
+        llm_mode = "online"
+        tts_mode = "online"
+    if args.llm is not None:
+        llm_mode = args.llm
+    if args.tts is not None:
+        tts_mode = args.tts
+
     root = Path(args.dir).resolve()
 
     if not root.exists():
@@ -347,31 +389,33 @@ async def main():
     system_prompt = build_system_prompt(structure_text, index_content)
     files = get_files_in_order(root, structure)
 
-    api_key = os.environ.get("CEREBRAS_API_KEY")
-    if not api_key:
-        print("Error: CEREBRAS_API_KEY not set")
-        print("  $env:CEREBRAS_API_KEY = 'your-key-here'")
-        sys.exit(1)
+    if llm_mode == "online":
+        api_key = os.environ.get("CEREBRAS_API_KEY")
+        if not api_key:
+            print("Error: CEREBRAS_API_KEY not set")
+            print("  $env:CEREBRAS_API_KEY = 'your-key-here'")
+            sys.exit(1)
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key, base_url=CEREBRAS_BASE_URL)
+    else:
+        from openai import OpenAI
+        client = OpenAI(api_key="sk-no-key-required", base_url=LLAMA_CPP_BASE_URL)
 
-    from openai import OpenAI
-
-    client = OpenAI(api_key=api_key, base_url=CEREBRAS_BASE_URL)
-
-    use_local_tts = args.local or not args.online
-    use_cuda = not args.cpu if use_local_tts else False
+    use_cuda = not args.cpu if tts_mode == "local" else False
     piper_voice = None
 
-    if use_local_tts:
+    llm_label = "llama.cpp" if llm_mode == "local" else f"{args.model} (Cerebras)"
+    if tts_mode == "local":
         piper_voice_name = args.voice if args.voice != DEFAULT_VOICE else DEFAULT_PIPER_VOICE
         device_label = "GPU" if use_cuda else "CPU"
         print(f"\n── Local TTS mode ({device_label}) ──")
-        print(f"  LLM: {args.model} (Cerebras)")
+        print(f"  LLM: {llm_label}")
         print(f"  TTS: Piper ({piper_voice_name}) on {device_label}")
         models_dir = Path(MODELS_DIR).resolve()
         piper_voice = load_piper_voice(models_dir, piper_voice_name, use_cuda=use_cuda)
     else:
-        print(f"\n── Online mode ──")
-        print(f"  LLM: {args.model} (Cerebras)")
+        print(f"\n── Online TTS mode ──")
+        print(f"  LLM: {llm_label}")
         print(f"  TTS: edge-tts ({args.voice})")
 
     next_file_map = {}
@@ -390,6 +434,7 @@ async def main():
             args.model,
             piper_voice,
             next_file_map.get(source_path),
+            llm_mode,
         )
 
     print(f"\nDone!")

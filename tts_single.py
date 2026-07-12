@@ -13,10 +13,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("file", help="Path to the .md file to process")
     parser.add_argument("--voice", default=pipe.DEFAULT_VOICE, help=f"Voice name (default: {pipe.DEFAULT_VOICE})")
-    parser.add_argument("--model", default=pipe.DEFAULT_MODEL, help=f"Cerebras model (default: {pipe.DEFAULT_MODEL})")
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument("--local", action="store_true", help="Local TTS via Piper")
-    group.add_argument("--online", action="store_true", help="Online TTS via edge-tts (default)")
+    parser.add_argument("--model", default=pipe.DEFAULT_MODEL, help=f"Cerebras model (default: {pipe.DEFAULT_MODEL}) — ignored when --llm local")
+    parser.add_argument("--local", action="store_true", help="Shorthand: use local LLM + local TTS")
+    parser.add_argument("--online", action="store_true", help="Shorthand: use online LLM + online TTS (default)")
+    parser.add_argument("--llm", choices=["online", "local"], help="LLM backend (online: Cerebras, local: llama.cpp)")
+    parser.add_argument("--tts", choices=["online", "local"], help="TTS backend (online: edge-tts, local: Piper)")
     device = parser.add_mutually_exclusive_group()
     device.add_argument("--cpu", action="store_true", help="Use CPU for local TTS")
     device.add_argument("--gpu", action="store_true", help="Use GPU for local TTS (default)")
@@ -25,6 +26,20 @@ def parse_args() -> argparse.Namespace:
 
 async def main():
     args = parse_args()
+
+    llm_mode = "online"
+    tts_mode = "online"
+    if args.local:
+        llm_mode = "local"
+        tts_mode = "local"
+    if args.online:
+        llm_mode = "online"
+        tts_mode = "online"
+    if args.llm is not None:
+        llm_mode = args.llm
+    if args.tts is not None:
+        tts_mode = args.tts
+
     source_path = Path(args.file).resolve()
 
     if not source_path.exists():
@@ -39,20 +54,23 @@ async def main():
 
     print(f"File: {source_path}")
 
-    api_key = os.environ.get("CEREBRAS_API_KEY")
-    if not api_key:
-        print("Error: CEREBRAS_API_KEY not set")
-        print("  $env:CEREBRAS_API_KEY = 'your-key-here'")
-        sys.exit(1)
+    if llm_mode == "online":
+        api_key = os.environ.get("CEREBRAS_API_KEY")
+        if not api_key:
+            print("Error: CEREBRAS_API_KEY not set")
+            print("  $env:CEREBRAS_API_KEY = 'your-key-here'")
+            sys.exit(1)
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key, base_url=pipe.CEREBRAS_BASE_URL)
+    else:
+        from openai import OpenAI
+        client = OpenAI(api_key="sk-no-key-required", base_url=pipe.LLAMA_CPP_BASE_URL)
 
-    from openai import OpenAI
-    client = OpenAI(api_key=api_key, base_url=pipe.CEREBRAS_BASE_URL)
-
-    use_local_tts = args.local or not args.online
-    use_cuda = not args.cpu if use_local_tts else False
+    use_cuda = not args.cpu if tts_mode == "local" else False
     piper_voice = None
 
-    if use_local_tts:
+    llm_label = "llama.cpp" if llm_mode == "local" else f"{args.model} (Cerebras)"
+    if tts_mode == "local":
         piper_voice_name = args.voice if args.voice != pipe.DEFAULT_VOICE else pipe.DEFAULT_PIPER_VOICE
         device_label = "GPU" if use_cuda else "CPU"
         print(f"  TTS: Piper ({piper_voice_name}) on {device_label}")
@@ -61,7 +79,7 @@ async def main():
     else:
         print(f"  TTS: edge-tts ({args.voice})")
 
-    print(f"  Model: {args.model} (Cerebras)")
+    print(f"  LLM: {llm_label}")
 
     content = pipe.read_file(source_path)
     if not content or len(content.strip()) < 10:
@@ -71,10 +89,14 @@ async def main():
     system_prompt = pipe.build_system_prompt(f"Single file: {source_path.name}", content[:500])
     print(f"\n=== Processing: {source_path.name}")
 
-    print(f"  Calling Cerebras API ({args.model})...")
-    voice_text = await pipe.call_cerebras(client, system_prompt, content, args.model)
+    if llm_mode == "local":
+        print(f"  Calling llama.cpp ({args.model})...")
+        voice_text = await pipe.call_llama_cpp(client, system_prompt, content, args.model)
+    else:
+        print(f"  Calling Cerebras API ({args.model})...")
+        voice_text = await pipe.call_cerebras(client, system_prompt, content, args.model)
     if not voice_text:
-        print(f"  [SKIP] No response from Cerebras")
+        print(f"  [SKIP] No response from LLM")
         return
 
     audio_output = source_path.with_suffix(".mp3" if piper_voice is None else ".wav")
