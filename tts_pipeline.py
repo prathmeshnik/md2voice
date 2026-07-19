@@ -42,6 +42,7 @@ def parse_args() -> argparse.Namespace:
     device = parser.add_mutually_exclusive_group()
     device.add_argument("--cpu", action="store_true", help="Use CPU for local TTS")
     device.add_argument("--gpu", action="store_true", help="Use GPU for local TTS (default)")
+    parser.add_argument("--prompt", help="Extra instruction appended to the system prompt (e.g. 'be very detailed')")
     return parser.parse_args()
 
 
@@ -387,6 +388,8 @@ async def main():
         read_file(root / "index.md") if (root / "index.md").exists() else ""
     )
     system_prompt = build_system_prompt(structure_text, index_content)
+    if args.prompt:
+        system_prompt += f"\n\nCUSTOM INSTRUCTIONS:\n{args.prompt}"
     files = get_files_in_order(root, structure)
 
     if llm_mode == "online":

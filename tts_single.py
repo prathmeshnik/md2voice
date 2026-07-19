@@ -21,6 +21,7 @@ def parse_args() -> argparse.Namespace:
     device = parser.add_mutually_exclusive_group()
     device.add_argument("--cpu", action="store_true", help="Use CPU for local TTS")
     device.add_argument("--gpu", action="store_true", help="Use GPU for local TTS (default)")
+    parser.add_argument("--prompt", help="Extra instruction appended to the system prompt (e.g. 'be very detailed')")
     return parser.parse_args()
 
 
@@ -87,6 +88,8 @@ async def main():
         return
 
     system_prompt = pipe.build_system_prompt(f"Single file: {source_path.name}", content[:500])
+    if args.prompt:
+        system_prompt += f"\n\nCUSTOM INSTRUCTIONS:\n{args.prompt}"
     print(f"\n=== Processing: {source_path.name}")
 
     if llm_mode == "local":
